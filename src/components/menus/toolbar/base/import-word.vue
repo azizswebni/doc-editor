@@ -8,44 +8,22 @@
 </template>
 
 <script setup lang="ts">
-import { loadResource } from '@/utils/load-resource'
+import mammoth from 'mammoth'
 
 const container = inject('container')
 const editor = inject('editor')
 const options = inject('options')
 const $options = options.value.importWord
 
-// 动态导入 mammoth.js
-onMounted(async () => {
-  await loadResource(
-    `${options.value.cdnUrl}/libs/mammoth/mammoth.browser.min.js`,
-    'script',
-    'mammoth-script',
-  )
-})
-
 const importWord = () => {
-  // @ts-expect-error, global variable injected by script
-  if (!mammoth) {
-    const dialog = useAlert({
-      attach: container,
-      theme: 'warning',
-      header: t('base.importWord.loadScript.title'),
-      body: t('base.importWord.loadScript.message'),
-      onConfirm() {
-        dialog.destroy()
-      },
-    })
-    return
-  }
   const { open, onChange } = useFileDialog({
     accept: '.docx',
     reset: true,
     multiple: false,
   })
-  // 打开文件对话框
+  // Open file dialog
   open()
-  // 插入文件
+  // Insert file
   onChange(async (files: FileList | null) => {
     const [file] = Array.from(files ?? [])
     if (!file) {
@@ -65,7 +43,7 @@ const importWord = () => {
       content: t('base.importWord.converting'),
     })
 
-    // 使用用户自定义导入方法
+    // Use custom import method
     if ($options?.useCustomMethod) {
       const result = await $options.onCustomImportMethod?.(file)
       message.close()
@@ -94,69 +72,147 @@ const importWord = () => {
       return
     }
 
-    // @ts-expect-error, global variable injected by script
-    if (!mammoth) {
-      return
-    }
-    // 使用 Mammoth 导入
-    const arrayBuffer = file.arrayBuffer()
-    // 一些配置默认
+    // Use Mammoth import
+    const arrayBuffer = await file.arrayBuffer()
+
+    // Enhanced configuration with text styling support
     const customOptions = {
-      transformConvertRun(run: any) {
-        const resultRun: any = {}
-        if (run.bgColor) {
-          resultRun['mark'] = {
-            style: `background-color:${run.bgColor}; color: inherit`,
-            'data-color': run.bgColor,
+      // Convert document properties including headers and footers
+      includeDefaultStyleMap: true,
+      includeEmbeddedStyleMap: true,
+      ignoreEmptyParagraphs: true,
+      idPrefix: 'docGen',
+      styleHook(el, pr) {
+        // Handle paragraph-level styles (alignment, indent, line-height)
+        if (el.name === 'w:p') {
+          const result = <any>[]
+
+          const alignEl = el.firstOrEmpty('w:pPr').first('w:jc')
+          if (alignEl) {
+            const alignVal = alignEl.attributes['w:val']
+            result.push(`text-align:${alignVal}`)
           }
+
+          const indentEl = el.firstOrEmpty('w:pPr').first('w:ind')
+          if (indentEl) {
+            const indentVal = indentEl.attributes['w:firstLineChars']
+            if (indentVal) {
+              result.push(
+                `text-indent:${parseFloat(indentVal / 100).toFixed(0)}em`,
+              )
+            }
+          }
+
+          const lineHeightEl = el.firstOrEmpty('w:pPr').first('w:spacing')
+          if (lineHeightEl) {
+            const lineHeightVal = lineHeightEl.attributes['w:line']
+            const lineTypeVal = lineHeightEl.attributes['w:lineRule']
+            if (lineHeightVal && lineTypeVal === 'auto') {
+              const lineHeight = parseFloat(lineHeightVal / 240).toFixed(2)
+              result.push(`line-height:${lineHeight}`)
+            } else if (lineHeightVal && lineTypeVal === 'exact') {
+              const lineHeight = parseFloat(lineHeightVal / 20).toFixed(2)
+              result.push(`line-height:${lineHeight}pt`)
+            }
+          }
+
+          return result.join(';') || ''
         }
-        return resultRun
+        // Handle text-run-level styles (color, font-size, bold) - these should be on inline elements
+        else if (el.name === 'w:r') {
+          const result = <any>[]
+          const rPr = el.firstOrEmpty('w:rPr')
+
+          const fontSizeEl = rPr.first('w:sz')
+          if (fontSizeEl) {
+            const fontSizeVal = fontSizeEl.attributes['w:val']
+            result.push(`font-size:${fontSizeVal / 2}pt`)
+          }
+
+          const colorEl = rPr.first('w:color')
+          if (colorEl) {
+            const colorVal = colorEl.attributes['w:val']
+            result.push(`color:#${colorVal}`)
+          }
+
+          const boldEl = rPr.first('w:b')
+          if (boldEl) {
+            const boldVal = boldEl.attributes['w:val']
+            if (boldVal !== '0') {
+              result.push(`font-weight:bold`)
+            }
+          }
+
+          return result.join(';') || ''
+        } else {
+          return ''
+        }
       },
       styleMap: [
-        "p[style-name='引用'] => blockquote.blockquote > p:fresh",
+        // Headings
+        "p[style-name='Heading 1'] => h1:fresh",
+        "p[style-name='Heading 2'] => h2:fresh",
+        "p[style-name='Heading 3'] => h3:fresh",
+        "p[style-name='Heading 4'] => h4:fresh",
+        "p[style-name='Heading 5'] => h5:fresh",
+        "p[style-name='Heading 6'] => h6:fresh",
+        "p[style-name='heading 1'] => h1:fresh",
+        "p[style-name='heading 2'] => h2:fresh",
+        "p[style-name='heading 3'] => h3:fresh",
+        "p[style-name='heading 4'] => h4:fresh",
+        "p[style-name='heading 5'] => h5:fresh",
+        "p[style-name='heading 6'] => h6:fresh",
+
+        // Blockquotes
+        "p[style-name='Quote'] => blockquote.blockquote > p:fresh",
+        "p[style-name='quote'] => blockquote.blockquote > p:fresh",
         "p[style-name='blockquote'] => blockquote.blockquote > p:fresh",
         "p[style-name='BlockQuote'] => blockquote.blockquote > p:fresh",
-        "p[style-name='代码块'] => pre.preCode > code:fresh",
+
+        // Code blocks
+        "p[style-name='Code Block'] => pre.preCode > code:fresh",
+        "p[style-name='code block'] => pre.preCode > code:fresh",
         "p[style-name='Code'] => pre.preCode > code:fresh",
         "p[style-name='code'] => pre.preCode > code:fresh",
+
+        // Text formatting
+        'b => strong',
+        'i => em',
+        'u => u',
+        'strike => s',
+
+        // Keep inline code
+        'code => code',
       ],
     }
-    // @ts-expect-error, global variable injected by script
-    const { messages, value } = await mammoth.convertToHtml(
-      { arrayBuffer },
-      {
-        ...customOptions,
-        ...$options.options,
-      },
-    )
-    if (messages.type === 'error') {
-      useMessage(
-        'error',
-        `${t('base.importWord.convertError')} (${messages.message})`,
-      )
-      return
-    }
+
     try {
-      // 解析和加工 Mammoth 返回的 HTML 内容
-      const domparser = new DOMParser()
-      const doc = domparser.parseFromString(value, 'text/html')
-      for (const img of doc.querySelectorAll('img')) {
-        const parent = img.parentElement
-        if (parent?.tagName === 'P') {
-          parent.insertAdjacentElement('beforebegin', img)
-          if (!parent.hasChildNodes() && parent.textContent === '') {
-            parent.remove()
-          }
-        }
+      const { messages, value } = await mammoth.convertToHtml(
+        { arrayBuffer },
+        {
+          ...customOptions,
+          ...$options.options,
+        },
+      )
+
+      if (messages.some((msg: any) => msg.type === 'error')) {
+        const errorMsg = messages.find((msg: any) => msg.type === 'error')
+        useMessage('error', {
+          attach: container,
+          content: `${t('base.importWord.convertError')} ${errorMsg && errorMsg.message}`,
+        })
+        message.close()
+        return
       }
-      const content = doc.body.innerHTML.toString()
-      editor.value?.commands.setContent(content)
+      editor.value?.commands.setContent(value)
       message.close()
-    } catch {
+    } catch (error) {
+      message.close()
       useMessage('error', {
         attach: container,
         content: t('base.importWord.importError'),
       })
+      console.error('Import error:', error)
     }
   })
 }
